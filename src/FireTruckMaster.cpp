@@ -1,452 +1,253 @@
 #include <master/firetruck.h>
 
-// These defined macros keep track of if the left stick moves - ctm 
-#define upConditional GameController.getAnalogHat(LeftHatY) < 70
-#define downConditional GameController.getAnalogHat(LeftHatY) > 220
-#define leftNeutralConditional GameController.getAnalogHat(LeftHatY) > 70 && GameController.getAnalogHat(LeftHatY) < 220
-
-// These defined macros keep track of if the right stick moves - ctm 
-#define leftConditional GameController.getAnalogHat(RightHatX) < 70
-#define rightConditional GameController.getAnalogHat(RightHatX) > 220
-#define rightNeutralConditional GameController.getAnalogHat(RightHatX) > 70 && GameController.getAnalogHat(RightHatX) < 220
-
+// Setup function that only runs once when the Arduino is powered on - ctm
 void setup()
 {
     Wire.begin();       // join i2c bus
+#ifdef DEBUG_FT
     Serial.begin(9600); // start serial for output
-    // block while waiting for character over serial
-    while (!Serial)
+#endif
+    if (Usb.Init() == -1)
     {
-
+#ifdef DEBUG_FT
+        Serial.print(F("\r\nOSC did not start"));
+#endif
+        while (1)
+            ; // Halt
     }
 
-    Serial.println("Starting Fire Truck Master Test");
+#ifdef DEBUG_FT
+    Serial.print(F("\r\nGameController Bluetooth Library Started"));
+#endif
 
-    #if !defined(__MIPSEL__)
-        while (!Serial)
-            ; // Wait for serial port to connect - used on Leonardo, Teensy and other boards with built-in USB CDC serial connection
-    #endif
-        if (Usb.Init() == -1)
-        {
-            Serial.print(F("\r\nOSC did not start"));
-            while (1)
-                ; // Halt
-        }
-        Serial.print(F("\r\nGameController Bluetooth Library Started"));
+    // set the angles for the motor and servo
+    truckMovementAngles.motor = MotorStopPoint;
+    truckMovementAngles.servo = 1500;
 
-        // Initialize the old state of the firetruck - ctm 
-        firetruck.oldState = fireTruckStates::still; 
+    SetUpPWMModule();
 
-        // Initialize the old state of the left stick - ctm 
-        leftStick.oldState = leftStickStates::leftStickNeutral;
-
-        // Initialize the old state of the right stick - ctm 
-        rightStick.oldState = rightStickStates::rightStickNeutral;
+    delay(500);
 }
 
+/********************************************************************************************************************/
+
+// Loop function that runs over and over again - ctm
 void loop()
 {
-    delayMicroseconds(600);
-    // #if defined(CONTROLLER_TEST)
 
     Usb.Task();
     if (GameController.connected())
     {
 
-        // If the X button has been hit, play the second sound - ctm 
-        if(GameController.getButtonClick(CROSS))
+        // If the X button has been hit, play the second sound - ctm
+        if (GameController.getButtonClick(CROSS))
         {
-            sendData(TruckControlData.SoundTwo, dummyData); 
+            sendData(TruckControlData.SoundTwo);
         }
 
-        // If the triangle button has been hit, play the first sound - ctm 
-        if(GameController.getButtonClick(TRIANGLE))
+        // If the triangle button has been hit, play the first sound - ctm
+        if (GameController.getButtonClick(TRIANGLE))
         {
-            sendData(TruckControlData.SoundOne, dummyData);
+            sendData(TruckControlData.SoundOne);
         }
 
-        // If the circle button has been hit, stop the current sound from playing - ctm 
-        if(GameController.getButtonClick(CIRCLE))
+        // If the circle button has been hit, stop the current sound from playing - ctm
+        if (GameController.getButtonClick(CIRCLE))
         {
-            sendData(TruckControlData.SoundStop, dummyData); 
+            sendData(TruckControlData.SoundStop);
         }
 
-        // If the square button has been hit, toggle the water pump - ctm 
-        if(GameController.getButtonClick(SQUARE))
+        // If the square button has been hit, toggle the water pump - ctm
+        if (GameController.getButtonClick(SQUARE))
         {
-            sendData(TruckControlData.ToggleWaterPump, dummyData); 
+            sendData(TruckControlData.ToggleWaterPump);
         }
-        if(GameController.getButtonClick(R3))
+        if (GameController.getButtonClick(R3))
         {
-            sendData(TruckControlData.ServoStraight, dummyData); 
+            truckControlTimes.servoEngaged = 0;
+            truckMovementAngles.servo = 1500;
+            pwm.writeMicroseconds(servoPin, truckMovementAngles.servo);
         }
-        // delay(500);
 
-        // Set the states of the left stick, right stick, and the firetruck - ctm 
-        getState(); 
-
-        // If the new firetruck state is different from the old one - ctm 
-        if(firetruck.newState != firetruck.oldState) {
-            sendMovementData = true;
-            fireTruckControl();
+        // call these functions to get and set the current state of the control sticks
+        truckControlTimes.current = micros();
+        if (truckControlTimes.current + truckControlTimes.motorsEngaged > LONG_MAX + (unsigned long)1)
+        {
+            truckControlTimes.motorsEngaged = 0;
+            truckControlTimes.current = micros();
         }
-        sendMovementData = false;
+        setSteeringServoState();
+        truckControlTimes.current = micros();
+
+        if (truckControlTimes.current + truckControlTimes.servoEngaged > LONG_MAX + (unsigned long)1)
+        {
+            truckControlTimes.servoEngaged = 0;
+            truckControlTimes.current = micros();
+        }
+        setMotorState();
+    } 
+
+    if (!GameController.connected())
+    {
+        truckMovementAngles.motor = MotorStopPoint;
+        pwm.setPWM(speedControllerPin, 0, truckMovementAngles.motor);
+        truckMovementAngles.servo = 1500;
+        pwm.writeMicroseconds(servoPin, truckMovementAngles.servo);
     }
 }
+
+/********************************************************************************************************************/
 
 // send data over I2C interface to slave
-void sendData(char data, char secondMovementChar)
+void sendData(char data)
 {
-    Serial.print("Sending: ");
-
-
-    Wire.beginTransmission(I2CAddress); // Transmit to device  
-    if (sendMovementData) {
-        Serial.println(data);
-        Serial.println(secondMovementChar);
-        Wire.write(TruckControlData.MovementData);
-        Wire.write(data);
-        Wire.write(secondMovementChar);
-        sendMovementData = false;
-    } else {
-        Serial.println(data);
-        Wire.write(data);                   // Send serial data
-    }
-    //Wire.write(data2);                  // Send serial data 
-    Wire.endTransmission();             // Stop transmitting 
-
+    Wire.beginTransmission(I2CAddress); // Transmit to device
+    Wire.write(data);       // Send serial data
+    Wire.endTransmission(); // Stop transmitting
 }
 
-// This function updates both the old/new state of both analog sticks - ctm 
-void getState()
+/********************************************************************************************************************/
+
+// This function checks
+void setMotorState()
 {
-    // Set the new states to be equal to the result of their respective functions - ctm 
-    leftStick.newState = getStateOfLeftStick();
-    rightStick.newState = getStateOfRightStick();
-    firetruck.oldState = firetruck.newState;
-    combineStates();
-
-    // Set the old states to be equal to the new states - ctm
-    leftStick.oldState = leftStick.newState;
-    rightStick.oldState = rightStick.newState; 
-}
-
-void fireTruckControl() {
-
-    // If the firetruck state is set to still - ctm 
-    if(firetruck.newState == fireTruckStates::still) 
-    {
-        sendData(TruckControlData.MotorStop, TruckControlData.MotorStop);
-
-    // If the firetruck state is set to forward to left - ctm 
-    } else if(firetruck.newState == fireTruckStates::forwardToLeft) {
-        sendData(TruckControlData.MotorForward, TruckControlData.ServoLeft);
-
-    // If the firetruck state is set to forward to right - ctm 
-    } else if(firetruck.newState == fireTruckStates::forwardToRight) {
-        sendData(TruckControlData.MotorForward, TruckControlData.ServoRight);
-
-    // If the firetruck state is set to forward - ctm 
-    } else if(firetruck.newState == fireTruckStates::forward) {
-        sendData(TruckControlData.MotorForward, TruckControlData.MotorBackward);
-
-    // If the firetruck state is set to backward to left - ctm 
-    } else if(firetruck.newState == fireTruckStates::backwardToLeft) {
-        sendData(TruckControlData.MotorBackward, TruckControlData.ServoLeft);
-
-    // If the firetruck state is set to backward to right - ctm 
-    } else if(firetruck.newState == fireTruckStates::backwardToRight) {
-        sendData(TruckControlData.MotorBackward, TruckControlData.ServoRight);
-
-    // If the firetruck state is set to backward - ctm 
-    } else if(firetruck.newState == fireTruckStates::backward) {
-        sendData(TruckControlData.MotorBackward, TruckControlData.MotorBackward);
-
-    // If the firetruck state is set to left - ctm 
-    } else if(firetruck.newState == fireTruckStates::left) {
-        sendData(TruckControlData.ServoLeft, TruckControlData.ServoLeft);
-
-    // If the firetruck state is set to right - ctm 
-    } else if(firetruck.newState == fireTruckStates::right) {
-        sendData(TruckControlData.MotorStop, TruckControlData.ServoRight);
-    } else if (firetruck.newState == fireTruckStates::straight) {
-        sendData(TruckControlData.MotorStop, TruckControlData.ServoStraight);
-    }
-}
-
-void combineStates()
-{
-
-    // If the new left stick state doesn't match to the old one - ctm 
-    if(leftStick.newState != leftStick.oldState) 
-    {
-
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm 
-        // Serial.println("Left stick new state differs from the old one");
-        switch (leftStick.newState)
-        {
-            
-            // If the left stick state is set to up - ctm 
-            case leftStickStates::leftStickUp:
-
-                    // If the right stick state is set to left - ctm 
-                    if(rightStick.newState == rightStickStates::rightStickLeft) 
-                    {
-                         
-                        firetruck.newState = fireTruckStates::forwardToLeft; 
-                        break;
-
-                    // If the right stick state is set to right - ctm 
-                    } else if(rightStick.newState == rightStickStates::rightStickRight) {
-                        
-                        firetruck.newState = fireTruckStates::forwardToRight;
-                        break; 
-                    
-                    } else {
- 
-                        firetruck.newState = fireTruckStates::forward; 
-                        break; 
-                    }
-
-
-
-            // If the left stick state is set to down - ctm 
-            case leftStickStates::leftStickDown:
-
-                    // If the right stick state is set to left - ctm 
-                    if(rightStick.newState == rightStickStates::rightStickLeft)
-                    {
-
-                        firetruck.newState = fireTruckStates::backwardToLeft; 
-                        break; 
-
-                    // If the right stick state is set to right - ctm 
-                    } else if(rightStick.newState == rightStickStates::rightStickRight) {
-
-                        firetruck.newState = fireTruckStates::backwardToRight; 
-                        break; 
-
-                    // If the right stick state is set to neutral - ctm 
-                    } else {
-
-                        firetruck.newState = fireTruckStates::backward; 
-                        break; 
-                    }
-
-            // If the left stick state is set to neutral - ctm 
-            case leftStickStates::leftStickNeutral:
-                
-                    // If the right stick state is set to left - ctm 
-                    if(rightStick.newState == rightStickStates::rightStickLeft) 
-                    {
-
-                        firetruck.newState = fireTruckStates::left;
-                        break;
-                    
-                    // If the right stick state is set to right - ctm 
-                    } else if(rightStick.newState == rightStickStates::rightStickRight) {
-
-                        firetruck.newState = fireTruckStates::right; 
-                        break; 
-
-                    // If the right stick state is set to neutral - ctm 
-                    } else {
-
-                        firetruck.newState = fireTruckStates::still;
-                        break; 
-                    }
-        }
-    }
-
-    // If the new right stick state doesn't match to the old one - ctm 
-    if(rightStick.newState != rightStick.oldState)
-    {
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm
-        // Serial.println("Right stick state differs from the old one"); 
-        switch (rightStick.newState) 
-        {
-            
-            // If the right stick state is set to left - ctm 
-            case rightStickStates::rightStickLeft:
-
-                    // If the left stick state is set to up - ctm 
-                    if(leftStick.newState == leftStickStates::leftStickUp) 
-                    {
-
-                        firetruck.newState = fireTruckStates::forwardToLeft;
-                        break; 
-
-                    // If the left stick state is set to down - ctm 
-                    } else if(leftStick.newState == leftStickStates::leftStickDown) {
-
-                        firetruck.newState = fireTruckStates::backwardToLeft; 
-                        break; 
-
-                    // If the left stick state is set to neutral - ctm 
-                    } else {
-
-                        firetruck.newState = fireTruckStates::left; 
-                        break; 
-                    }
-                break; 
-            
-            // If the right stick state is set to right - ctm 
-            case rightStickStates::rightStickRight:
-                    
-                // If the left stick state is set to up - ctm 
-                if(leftStick.newState == leftStickStates::leftStickUp)
-                {
-
-                    firetruck.newState = fireTruckStates::forwardToRight;
-                    break;
-                    
-                // If the left stick state is set to down - ctm 
-                } else if(leftStick.newState == leftStickStates::leftStickDown) {
-
-                    firetruck.newState = fireTruckStates::backwardToRight;
-                    break; 
-
-                // If the left stick state is set to neutral - ctm 
-                } else {
-
-                    firetruck.newState = fireTruckStates::right; 
-                    break; 
-                }
-
-                break;
-            
-            // If the right stick state is set to neutral - ctm 
-            case rightStickStates::rightStickNeutral:
-
-                    // If the left stick state is set to up - ctm 
-                    if(leftStick.newState == leftStickStates::leftStickUp)
-                    {
-
-                        firetruck.newState = fireTruckStates::forward;
-                        break;
-
-                    // If the left stick state is set to down - ctm 
-                    } else if(leftStick.newState == leftStickStates::leftStickDown) {
-
-                        firetruck.newState = fireTruckStates::backward; 
-                        break; 
-
-                    // If the left stick state is set to neutral - ctm 
-                    } else {
-
-                        firetruck.newState = fireTruckStates::straight;
-                        break; 
-                    }
-        }
-    }
-}
-
-// This function updates the new state of the left stick and returns the new state depending on if the old state is the same or not - ctm 
-leftStickStates getStateOfLeftStick()
-{
-    // Set these bools equal to the macros defined at the beginning - ctm 
+    // Set these bools equal to the macros defined at the beginning - ctm
     // check motor stick position and set flags aproproately
-    // Might have to add debouncing later 
-    delayMicroseconds(200);
-    bool isUp = upConditional;
-    delayMicroseconds(200);
-    isUp = upConditional;
-    delayMicroseconds(300);
-    bool isDown = downConditional;
-    delayMicroseconds(300);
-    isDown = downConditional;
-    delayMicroseconds(300);
-    bool isNeutral = leftNeutralConditional; 
-    delayMicroseconds(300);
-    isNeutral = leftNeutralConditional; 
+    // Might have to add debouncing later
 
-    // If the left stick is up - ctm 
-    if(isUp && !isDown)
+    bool isForward = motorStickForwardBoundCheck;
+
+    bool isBackward = motorStickBackwardBoundCheck;
+
+    // If the left stick is up - ctm
+    if (isForward && !isBackward)
     {
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm 
-        // Serial.println("Left stick up"); 
-        leftStick.newState = leftStickStates::leftStickUp;
-
-    // If the left stick is down - ctm 
-    } else if (!isUp && isDown) {
-        
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm 
-        //Serial.println("Left stick down"); 
-
-        leftStick.newState = leftStickStates::leftStickDown; 
-
-    // If the left stick is neutral - ctm 
-    } else {
-
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm 
-        // Serial.println("Left stick neutral");
-        leftStick.newState = leftStickStates::leftStickNeutral; 
-    }
-
-    // If the old state differs from the new one - ctm 
-    if(leftStick.oldState != leftStick.newState) {
-        if(isNeutral)
+        motorsMoving = true;
+        if (truckControlTimes.current - truckControlTimes.motorsEngaged >= motorPeriod)
         {
+            if (MotorForwardAngleCheck)
+            {
+                truckControlTimes.motorsEngaged = millis();
 
-            return leftStickStates::leftStickNeutral;
-        } else if(isUp && !isDown) {
-            return leftStickStates::leftStickUp;
-        } else {
-            return leftStickStates::leftStickDown; 
+                // Replace with PWM module code
+                pwm.setPWM(speedControllerPin, 0, truckMovementAngles.motor);
+                // pwm.writeMicroseconds(speedControllerPin, truckMovementAngles.motor);
+                truckMovementAngles.motor += motorAngleChange;
+            }
         }
     }
+    else if (!isForward && isBackward)
+    {
+        motorsMoving = true;
+        if (MotorBackwardAngleCheck)
+        {
+            truckControlTimes.motorsEngaged = millis();
 
-    return leftStick.oldState; 
+            pwm.setPWM(speedControllerPin, 0, truckMovementAngles.motor);
+            // Not needed - left here for posterity
+            // pwm.writeMicroseconds(speedControllerPin, truckMovementAngles.motor);
+            truckMovementAngles.motor -= motorAngleChange;
+        }
+    } // If the left stick is neutral - ctm
+    else
+    {
+        if (motorsMoving && truckControlTimes.current - truckControlTimes.motorsEngaged >= motorPeriod)
+        {
+            // motor is backward
+            if (truckMovementAngles.motor <= MotorStopPoint)
+            {
+                pwm.setPWM(speedControllerPin, 0, truckMovementAngles.motor);
+                // Not needed - left here for posterity
+                // pwm.writeMicroseconds(speedControllerPin, truckMovementAngles.motor);
+                truckMovementAngles.motor += motorAngleChange;
+                truckControlTimes.motorsEngaged = truckControlTimes.current;
+            }
+            // motor is backward
+            else if (truckMovementAngles.motor >= MotorStopPoint)
+            {
+                // Replace with PWM module code
+                pwm.setPWM(speedControllerPin, 0, truckMovementAngles.motor);
+                truckMovementAngles.motor -= motorAngleChange;
+                truckControlTimes.motorsEngaged = truckControlTimes.current;
+            }
+        }
+    }
 }
 
-// This function updates the new state of the right stick and returns the new state depending on if the old state is the same or not - ctm
-rightStickStates getStateOfRightStick()
+/********************************************************************************************************************
+
+This function updates the new state of the right stick and returns the new state depending on if the old state is the same or not - ctm
+
+  Outline:
+
+    - check and set the current states of the servoControl stick
+      - check if the servo control stick is right or left
+      - set the truckControlTimes.motorsEngaged to the current time
+      - we might want to have additional bools for the state of the servo
+
+********************************************************************************************************************/
+void setSteeringServoState()
 {
 
-    // Set these bools equal to the macros defined at the beginning - ctm 
+    // Set these bools equal to the macros defined at the beginning - ctm
     // delay(500);
     // delayMicroseconds(2000);
     bool isLeft = leftConditional;
     // delayMicroseconds(2000);
     // delay(500);
     bool isRight = rightConditional;
-    // delayMicroseconds(2000);
-    // delay(500);
-    bool isNeutral = rightNeutralConditional;
 
-    // If the right stick is to the left - ctm 
-    if(isLeft && !isRight) {
-        
-        // Debug message NOTE ARDUINO DOES RECOGNIZE THIS - ctm 
-        // Serial.println("Right stick left"); 
-        rightStick.newState = rightStickStates::rightStickLeft;
-
-    // If the right stick is to the right - ctm 
-    } else if (!isLeft && isRight) {
-
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm
-        // Serial.println("Right stick right"); 
-        rightStick.newState = rightStickStates::rightStickRight; 
-
-    // If the right stick is neutral - ctm 
-    } else {
-        
-        // Debug message NOTE: ARDUINO DOES RECOGNIZE THIS - ctm 
-        // Serial.println("Right stick neutral"); 
-        rightStick.newState = rightStickStates::rightStickNeutral; 
-    }
-
-    // If the old state differs from the new one - ctm 
-    if(rightStick.oldState != rightStick.newState) {
-        if(isNeutral) {
-            return rightStickStates::rightStickNeutral;
-        } else if(isLeft && !isRight) {
-            return rightStickStates::rightStickLeft;
-        } else {
-            return rightStickStates::rightStickRight; 
+    // truckMovementAngles.servo = SteeringServo.read();
+    // If the right stick is to the left - ctm
+    if (isLeft && !isRight)
+    {
+        if (truckControlTimes.current - truckControlTimes.servoEngaged >= servoPeriod)
+        {
+            if (truckMovementAngles.servo >= 1000)
+            {
+                truckControlTimes.servoEngaged = truckControlTimes.current;
+                truckMovementAngles.servo -= steeringAngleChange;
+                // Replace with PWM module code
+                pwm.writeMicroseconds(servoPin, truckMovementAngles.servo);
+            }
         }
     }
+    else if (!isLeft && isRight)
+    {
 
-    return rightStick.oldState; 
+        if (truckControlTimes.current - truckControlTimes.servoEngaged >= servoPeriod)
+        {
+            if (truckMovementAngles.servo <= 2000)
+            {
+                truckControlTimes.servoEngaged = truckControlTimes.current;
+                truckMovementAngles.servo += steeringAngleChange;
+                // Replace with PWM module code
+                pwm.writeMicroseconds(servoPin, truckMovementAngles.servo);
+            }
+        }
+    }
+}
 
+void SetUpPWMModule() {
+     pwm.begin();
+  /*
+   * In theory the internal oscillator (clock) is 25MHz but it really isn't
+   * that precise. You can 'calibrate' this by tweaking this number until
+   * you get the PWM update frequency you're expecting!
+   * The int.osc. for the PCA9685 chip is a range between about 23-27MHz and
+   * is used for calculating things like writeMicroseconds()
+   * Analog servos run at ~50 Hz updates, It is importaint to use an
+   * oscilloscope in setting the int.osc frequency for the I2C PCA9685 chip.
+   * 1) Attach the oscilloscope to one of the PWM signal pins and ground on
+   *    the I2C PCA9685 chip you are setting the value for.
+   * 2) Adjust setOscillatorFrequency() until the PWM update frequency is the
+   *    expected value (50Hz for most ESCs)
+   * Setting the value here is specific to each individual I2C PCA9685 chip and
+   * affects the calculations for the PWM update frequency. 
+   * Failure to correctly set the int.osc value will cause unexpected PWM results
+   */
+  pwm.setOscillatorFrequency(26000000);
+  pwm.setPWMFreq(SERVO_FREQ);  // Analog servos run at ~50 Hz updates
+
+  delay(10);
 }
